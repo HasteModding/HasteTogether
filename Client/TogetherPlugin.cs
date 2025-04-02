@@ -11,7 +11,6 @@ using HarmonyLib;
 using JetBrains.Annotations;
 using Landfall.Haste;
 using Landfall.Haste.Steam;
-using MonoMod.Utils;
 using Steamworks;
 using TMPro;
 using UnityEngine;
@@ -21,23 +20,14 @@ using Zorro.ControllerSupport;
 using Zorro.Settings;
 using Zorro.Settings.DebugUI;
 using FloatSettingUI = Zorro.Settings.UI.FloatSettingUI;
+using Logger = UnityEngine.Logger;
 using PlatformSelector = Landfall.Haste.PlatformSelector;
 using Landfall.Modding;
-using System.Collections.Concurrent;
 
 namespace HasteTogether;
 
 [LandfallPlugin]
-public class Loader
-{
-    static Loader()
-    {
-        if (GameObject.Find("HasteTogetherManager")) return;
-        GameObject.DontDestroyOnLoad(new GameObject("HasteTogetherManager").AddComponent<TogetherPlugin>().gameObject);
-    }
-}
-
-public class TogetherPlugin : MonoBehaviour
+public class Plugin
 {
     private static readonly Harmony Patcher = new("gingerphoenix10.HasteTogether");
 
@@ -46,7 +36,7 @@ public class TogetherPlugin : MonoBehaviour
 
     public static Transform TogetherUI;
     
-    private void Awake()
+    static Plugin()
     {
         Patcher.PatchAll();
         Debug.Log($"Plugin HasteTogether is loaded!");
@@ -59,7 +49,6 @@ public class TogetherPlugin : MonoBehaviour
         
         manager.OnDataReceived += async (byte[] receivedData) =>
         {
-            return;
             ushort userId;
             NetworkedPlayer plr = null;
             switch (receivedData[0])
@@ -158,11 +147,11 @@ public class TogetherPlugin : MonoBehaviour
                     
                     break;*/
             }
-            //SimpleRunHandler.currentSeed = 0;
         };
         
         _ = manager.StartListening(endpoint);
     }
+    
     public static byte[] SerializeTransform(Vector3 position, Quaternion rotation)
     {
         byte[] buffer = new byte[15];
@@ -228,44 +217,31 @@ public class TogetherPlugin : MonoBehaviour
                 }
             }
 
-            //manager.OnDataReceived += OnResponseReceived; 
+            manager.OnDataReceived += OnResponseReceived; 
 
             new GetPacket(id).Send();
 
             networkedPlayer.playerName = await tcs.Task;
         
-            //manager.OnDataReceived -= OnResponseReceived;
+            manager.OnDataReceived -= OnResponseReceived;
             return networkedPlayer;
         }
 
-        Debug.Log("[ERROR] Not in a scene where a PlayerModel exists.");
+        Console.WriteLine("[ERROR] Not in a scene where a PlayerModel exists.");
         return null;
     }
+
 }
 
 public class SocketManager
 {
-    private readonly SynchronizationContext mainThread;
     public Socket client;
     private byte[] buffer = new byte[1024];
 
     public event Action<byte[]> OnDataReceived;
 
-    private ConcurrentQueue<byte[]> messageQueue = new ConcurrentQueue<byte[]>();
-
-    public void Update()
-    {
-        // Process messages safely in Unity's main thread
-        while (messageQueue.TryDequeue(out byte[] data))
-        {
-            OnDataReceived?.Invoke(data);
-        }
-    }
-    
-
     public SocketManager()
     {
-        mainThread = SynchronizationContext.Current;
         client = new Socket(
             AddressFamily.InterNetwork,
             SocketType.Stream,
@@ -284,66 +260,67 @@ public class SocketManager
         }
         catch (Exception ex)
         {
-            Debug.Log($"Connection error: {ex.Message}");
+            Console.WriteLine($"Connection error: {ex.Message}");
             foreach (NetworkedPlayer plr in GameObject.FindObjectsOfType<NetworkedPlayer>()) GameObject.Destroy(plr.gameObject);
             await Task.Delay(3000);
             _ = StartListening(endpoint);
         }
     }
 
-    private async Task ReceiveLoop(IPEndPoint endpoint)
+private async Task ReceiveLoop(IPEndPoint endpoint)
+{
+    MemoryStream messageBuffer = new MemoryStream();
+    while (true)
     {
-        MemoryStream messageBuffer = new MemoryStream();
-        while (true)
+        try
         {
-            try
+            int bytesRead = await client.ReceiveAsync(buffer, SocketFlags.None);
+            if (bytesRead == 0)
             {
-                int bytesRead = await client.ReceiveAsync(buffer, SocketFlags.None);
-                if (bytesRead == 0)
-                {
-                    Debug.Log("Disconnected from server.");
-                    await Task.Delay(3000);
-                    client.Dispose();
-                    client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-                    _ = StartListening(endpoint);
-                    break;
-                }
-
-                messageBuffer.Write(buffer, 0, bytesRead);
-                
-                while (messageBuffer.Length >= 2)
-                {
-                    byte[] lengthBytes = messageBuffer.ToArray().Take(2).ToArray();
-                    ushort messageLength = BitConverter.ToUInt16(lengthBytes, 0);
-
-                    if (messageBuffer.Length >= messageLength + 2)
-                    {
-                        byte[] messageBytes = messageBuffer.ToArray().Skip(2).Take(messageLength).ToArray();
-
-                        var bytes = messageBytes;
-                        OnDataReceived?.Invoke(bytes);
-
-                        // Remove processed data
-                        byte[] remaining = messageBuffer.ToArray().Skip(messageLength + 2).ToArray();
-                        messageBuffer.SetLength(0);
-                        messageBuffer.Write(remaining, 0, remaining.Length);
-                    }
-                    else break;
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.Log($"Socket error: {ex.Message}");
-                foreach (NetworkedPlayer plr in GameObject.FindObjectsOfType<NetworkedPlayer>())
-                    GameObject.Destroy(plr.gameObject);
+                Console.WriteLine("Disconnected from server.");
                 await Task.Delay(3000);
                 client.Dispose();
                 client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
                 _ = StartListening(endpoint);
                 break;
             }
+
+            messageBuffer.Write(buffer, 0, bytesRead);
+            
+            while (messageBuffer.Length >= 2)
+            {
+                byte[] lengthBytes = messageBuffer.ToArray().Take(2).ToArray();
+                ushort messageLength = BitConverter.ToUInt16(lengthBytes, 0);
+
+                if (messageBuffer.Length >= messageLength + 2)
+                {
+                    byte[] messageBytes = messageBuffer.ToArray().Skip(2).Take(messageLength).ToArray();
+
+                    OnDataReceived?.Invoke(messageBytes);
+
+                    // Remove processed data
+                    byte[] remaining = messageBuffer.ToArray().Skip(messageLength + 2).ToArray();
+                    messageBuffer.SetLength(0);
+                    messageBuffer.Write(remaining, 0, remaining.Length);
+                }
+                else break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Socket error: {ex.Message}");
+            foreach (NetworkedPlayer plr in GameObject.FindObjectsOfType<NetworkedPlayer>())
+                GameObject.Destroy(plr.gameObject);
+            await Task.Delay(3000);
+            client.Dispose();
+            client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            _ = StartListening(endpoint);
+            break;
         }
     }
+}
+
+
 }
 
 public class ConnectionState : MonoBehaviour
@@ -353,9 +330,9 @@ public class ConnectionState : MonoBehaviour
     public Sprite disconnected;
     void Update()
     {
-        if (TogetherPlugin.manager == null || TogetherPlugin.manager.client == null || connected == null)
+        if (Plugin.manager == null || Plugin.manager.client == null || connected == null)
             return;
-        img.sprite = TogetherPlugin.manager.client.Connected ? connected : disconnected;
+        img.sprite = Plugin.manager.client.Connected ? connected : disconnected;
     }
 }
 
@@ -413,8 +390,6 @@ public class NetworkedPlayer : MonoBehaviour
         Quaternion targetRotation = new Quaternion(rotX, rotY, rotZ, rotW);
         rotation = targetRotation;
         position = targetPosition;
-        
-        animator.Play("New_Courier_Idle");
     }
 
     private float interpolationSpeed = 10.0f;
@@ -464,21 +439,21 @@ public abstract class Packet
 
     public void Send()
     {
-        if (TogetherPlugin.manager.client == null || !TogetherPlugin.manager.client.Connected) return;//throw new Exception("Not connected to a server!");
+        if (Plugin.manager.client == null || !Plugin.manager.client.Connected) return;//throw new Exception("Not connected to a server!");
         byte[] data = Serialize();
         byte[] toSend = new byte[data.Length+1];
         toSend[0] = PacketID();
         Buffer.BlockCopy(data, 0, toSend, 1, data.Length);
         byte[] lengthPrefix = BitConverter.GetBytes((ushort)toSend.Length);
         byte[] fullMessage = lengthPrefix.Concat(toSend).ToArray();
-        TogetherPlugin.manager.client.Send(fullMessage);
+        Plugin.manager.client.Send(fullMessage);
     }
 }
 
 public class UpdatePacket : Packet
 {
     public override byte PacketID() => 0x01;
-    public override byte[] Serialize() => TogetherPlugin.SerializeTransform(position, rotation);
+    public override byte[] Serialize() => Plugin.SerializeTransform(position, rotation);
 
     private Vector3 position;
     private Quaternion rotation;
@@ -620,10 +595,10 @@ internal static class PlayerCharacterPatch
     internal static void Update(PlayerCharacter __instance)
     {
         UpdatePacket packet = new UpdatePacket(__instance.transform);
-        if (!TogetherPlugin.lastSent.Equals(packet))
+        if (!Plugin.lastSent.Equals(packet))
         {
             packet.Send();
-            TogetherPlugin.lastSent = packet;
+            Plugin.lastSent = packet;
         }
     }
 }
@@ -646,11 +621,11 @@ internal static class PersistentObjectsPatch
             GameObject.DontDestroyOnLoad(__instance.gameObject);
             Transform persistent = __instance.transform.Find("UI_Persistent");
             
-            TogetherPlugin.TogetherUI = new GameObject("TogetherUI").transform;
-            TogetherPlugin.TogetherUI.SetParent(persistent);
+            Plugin.TogetherUI = new GameObject("TogetherUI").transform;
+            Plugin.TogetherUI.SetParent(persistent);
             
             Transform TogetherConnectionImg = new GameObject("Connection").transform;
-            TogetherConnectionImg.SetParent(TogetherPlugin.TogetherUI);
+            TogetherConnectionImg.SetParent(Plugin.TogetherUI);
             ConnectionState state = TogetherConnectionImg.gameObject.AddComponent<ConnectionState>();
             state.img = TogetherConnectionImg.gameObject.AddComponent<Image>();
             state.img.transform.localPosition = new Vector2(1780, 100);
