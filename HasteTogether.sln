@@ -1,0 +1,31 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.11.35327.3
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "HasteTogether", "Client\HasteTogether.csproj", "{42FD62C2-656B-46A2-8BEB-BEE097FD6D22}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HasteServer", "Server\HasteServer.csproj", "{EC8CA29C-8506-4199-A255-A40E4F6C7489}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{42FD62C2-656B-46A2-8BEB-BEE097FD6D22}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{42FD62C2-656B-46A2-8BEB-BEE097FD6D22}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{42FD62C2-656B-46A2-8BEB-BEE097FD6D22}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{42FD62C2-656B-46A2-8BEB-BEE097FD6D22}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EC8CA29C-8506-4199-A255-A40E4F6C7489}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EC8CA29C-8506-4199-A255-A40E4F6C7489}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EC8CA29C-8506-4199-A255-A40E4F6C7489}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EC8CA29C-8506-4199-A255-A40E4F6C7489}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {0B756B4E-3A23-4640-9003-26342202F36C}
+	EndGlobalSection
+EndGlobal
