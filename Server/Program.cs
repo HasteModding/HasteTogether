@@ -80,7 +80,7 @@ class SocketServer
                         {
                             case 0x03:
                                 clients[clientSocket].username = Encoding.UTF8.GetString(receivedData, 1, receivedData.Length - 1);
-                                //Console.WriteLine($"{clients[clientSocket].userId} username set to {clients[clientSocket].username}");
+                                Console.WriteLine($"{clients[clientSocket].userId} username set to {clients[clientSocket].username}");
 
                                 toSend = new byte[receivedData.Length + 2];
                                 toSend[0] = receivedData[0];

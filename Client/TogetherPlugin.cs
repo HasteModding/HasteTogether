@@ -45,6 +45,9 @@ public class Plugin
         IPAddress address = IPAddress.Parse("45.133.89.163");
         IPEndPoint endpoint = new(address, 9843);
         manager = new SocketManager();
+
+        double lastUpdatePacket = 0;
+        
         Debug.Log("Connecting to server...");
         
         manager.OnDataReceived += async (byte[] receivedData) =>
@@ -55,6 +58,11 @@ public class Plugin
             {
                 case 0x01:
                     userId = (ushort)((receivedData[1] << 8) | receivedData[2]);
+                    
+                    double epoch = (DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalSeconds;
+                    if (epoch <= lastUpdatePacket + 0.1) break;
+                    lastUpdatePacket = epoch;
+                    
                     foreach (NetworkedPlayer plrPossibility in GameObject.FindObjectsOfType<NetworkedPlayer>())
                     {
                         if (plrPossibility.userId == userId)
@@ -63,7 +71,7 @@ public class Plugin
                             break;
                         }
                     }
-
+                    
                     plr ??= await SetupNetworkedPlayer(userId);
 
                     if (plr == null) break;
@@ -390,6 +398,8 @@ public class NetworkedPlayer : MonoBehaviour
         Quaternion targetRotation = new Quaternion(rotX, rotY, rotZ, rotW);
         rotation = targetRotation;
         position = targetPosition;
+        
+        animator.Play("New_Courier_Idle");
     }
 
     private float interpolationSpeed = 10.0f;
