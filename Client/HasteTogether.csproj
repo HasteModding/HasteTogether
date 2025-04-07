@@ -31,7 +31,7 @@
         <Reference Include="$(HASTEDir)\Haste_Data\Managed\System.Runtime.dll" Private="false"/>
         <Reference Include="$(HASTEDir)\Haste_Data\Managed\UnityEngine.*.dll" Private="false"/>
         <Reference Include="$(HASTEDir)\Haste_Data\Managed\System.Net.Primitives.dll" Private="false"/>
-        <Reference Include="D:\Steam\steamapps\workshop\content\1796470\3408901301\0Harmony.dll"/>
+        <Reference Include="$(HASTEDir)\..\..\workshop\content\1796470\3408901301\0Harmony.dll"/>
         <Publicize Include="Assembly-CSharp" />
     </ItemGroup>
 
