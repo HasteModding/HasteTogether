@@ -1,14 +1,11 @@
-﻿using System.Reflection;
-using System.Text;
+﻿using System.Text;
 using Landfall.Haste;
 using Landfall.Modding;
-using MonoMod.RuntimeDetour;
 using SettingsLib.Settings;
 using Steamworks;
 using TMPro;
 using UnityEngine;
 using UnityEngine.Localization;
-using UnityEngine.UI;
 using Zorro.Core.CLI;
 using Zorro.Settings;
 
@@ -32,9 +29,6 @@ public class Plugin
 
     // Static cache of current public lobbies (optional, data is mainly in the setting now)
     public static List<PublicLobbyInfo> CurrentPublicLobbies = new List<PublicLobbyInfo>();
-
-    // Static cache for last sent animation packet to avoid redundant sends
-    public static AnimationPacket? lastAnimationPacket;
 
     // Static constructor
     static Plugin()
@@ -164,21 +158,6 @@ public class Plugin
         buffer[13] = (byte)((rotW >> 8) & 0xFF);
         buffer[14] = (byte)(rotW & 0xFF);
         return buffer;
-    }
-
-    /// <summary>
-    /// Checks if the animation state has changed and sends the packet if needed.
-    /// </summary>
-    public static void SendAnimationPacketIfNeeded(AnimationPacket packet)
-    {
-        // Compare with the last sent packet (handle null case)
-        if (lastAnimationPacket != null && lastAnimationPacket.Equals(packet))
-        {
-            return; // No change, don't send
-        }
-        // Send reliably via broadcast (adjust if needed)
-        packet.Broadcast(SendType.Reliable);
-        lastAnimationPacket = packet; // Update the cache
     }
 
     /// <summary>
@@ -451,8 +430,7 @@ public partial class NetworkManager // Made partial for potential future extensi
         if (IsInLobby)
         {
             Debug.LogWarning("[HasteTogether] Already in a lobby.");
-            // Optionally leave current lobby first?
-            // LeaveLobby();
+            LeaveLobby();
             return;
         }
         if (!lobbyId.IsValid())
@@ -821,7 +799,7 @@ public partial class NetworkManager // Made partial for potential future extensi
                 lobbyName = SteamFriends.GetFriendPersonaName(ownerId) + "'s Lobby";
             }
 
-            // You could add more data here, like player count:
+            // Could add more data here, like player count:
             // int currentPlayers = SteamMatchmaking.GetNumLobbyMembers(lobbyId);
             // int maxPlayers = SteamMatchmaking.GetLobbyMemberLimit(lobbyId);
             // lobbyName += $" ({currentPlayers}/{maxPlayers})";
@@ -883,136 +861,102 @@ public partial class NetworkManager // Made partial for potential future extensi
         }
     }
 
-    private void ProcessPacketData(CSteamID sourceSteamId, byte[] packetData)
+private void ProcessPacketData(CSteamID sourceSteamId, byte[] packetData)
+{
+    if (packetData == null || packetData.Length == 0) return; // Empty check
+
+    NetworkedPlayer? plr = null;
+    byte packetId = packetData[0];
+    byte[] payload = packetData.Skip(1).ToArray(); // Get payload (data after ID)
+
+    try
     {
-        if (packetData == null || packetData.Length == 0)
+        plr = Plugin.GetOrSetupPlayer(sourceSteamId); // Get player early if possible
+        if (plr == null && packetId != 0x02) // Allow name packet to create player
         {
-            Debug.LogWarning(
-                $"[HasteTogether] Received empty packet data from {sourceSteamId}."
-            );
-            return;
+             Debug.LogWarning($"[HasteTogetherP2P] Received packet {packetId} for unknown or invalid player {sourceSteamId}.");
+             return;
+        }
+        if (plr != null && plr.animator == null && packetId >= 0x10) // Check animator for animation packets
+        {
+             Debug.LogWarning($"[HasteTogetherP2P] Received animation packet {packetId} for player {sourceSteamId} but animator is missing.");
+             return;
         }
 
-        NetworkedPlayer? plr = null;
-        byte packetId = packetData[0]; // First byte is the packet ID
 
-        try
+        switch (packetId)
         {
-            switch (packetId)
-            {
-                case 0x01: // Player Transform Update
-                    if (packetData.Length < 16) // 1 byte ID + 15 bytes data
-                    {
-                        Debug.LogWarning(
-                            $"[HasteTogether] Received malformed Transform packet (ID 0x01) from {sourceSteamId}. Length: {packetData.Length}"
-                        );
-                        break;
-                    }
-                    plr = Plugin.GetOrSetupPlayer(sourceSteamId);
-                    if (plr == null)
-                        break;
+            case 0x01: // Player Transform Update
+                if (payload.Length < 16) { Debug.LogWarning($"[HasteTogetherP2P] Malformed Transform packet (ID 0x01) from {sourceSteamId}. Length: {payload.Length}"); break; }
+                // Deserialize directly here or pass to ApplyTransform
+                UpdatePacket.Deserialize(payload, out Vector3 pos, out Quaternion rot, out bool grounded);
+                plr?.ApplyTransformAndState(pos, rot, grounded); // New method in NetworkedPlayer
+                break;
 
-                    byte[] rawTransform = new byte[15];
-                    Buffer.BlockCopy(packetData, 1, rawTransform, 0, 15);
-                    plr.ApplyTransform(rawTransform);
-                    break;
+            case 0x02: // Player Name Update
+                if (payload.Length < 1) { Debug.LogWarning($"[HasteTogetherP2P] Malformed Name packet (ID 0x02) from {sourceSteamId}. Length: {payload.Length}"); break; }
+                // Ensure player exists *after* getting name
+                 plr = Plugin.GetOrSetupPlayer(sourceSteamId);
+                 if (plr == null) break;
+                string receivedName = Encoding.UTF8.GetString(payload);
+                plr.playerName = receivedName;
+                Debug.Log($"[HasteTogetherP2P] Received name for {sourceSteamId}: {plr.playerName}");
+                break;
 
-                case 0x02: // Player Name Update
-                    if (packetData.Length < 2) // 1 byte ID + at least 1 byte name
-                    {
-                        Debug.LogWarning(
-                            $"[HasteTogether] Received malformed Name packet (ID 0x02) from {sourceSteamId}. Length: {packetData.Length}"
-                        );
-                        break;
-                    }
-                    plr = Plugin.GetOrSetupPlayer(sourceSteamId);
-                    if (plr == null)
-                        break;
+            // --- Animation Event Cases ---
+            case 0x10: // Jump
+                plr?.animator?.SetTrigger("JumpTrigger"); // Assuming a trigger named "JumpTrigger" exists
+                // Or call a method if NetworkedPlayer has one: plr.HandleRemoteJump();
+                break;
+            case 0x11: // Land
+                var landPacket = LandPacket.Deserialize(payload);
+                // We need to replicate the logic from PlayerAnimationHandler.Land based on type
+                // This might involve playing specific state names directly
+                string landAnimState = "New_Courier_Dash_LandType1"; // Default/Bad/Ok
+                if (landPacket.LandingType == LandingType.Good) landAnimState = "New_Courier_Dash_LandType3";
+                else if (landPacket.LandingType == LandingType.Perfect) landAnimState = "New_Courier_Dash_LandType4";
+                plr?.animator?.Play(landAnimState, 0, 0f);
+                // Maybe set a landing type parameter if the animator uses one:
+                // plr.animator.SetInteger("LandingType", (int)landPacket.LandingType);
+                break;
+            case 0x12: // WallBounce
+                plr?.animator?.SetBool("Wall Bounce", true); // Set bool, needs to be reset in NetworkedPlayer.Update
+                break;
+            case 0x13: // Wave
+                plr?.animator?.SetBool("Wave", true); // Set bool, needs to be reset in NetworkedPlayer.Update
+                break;
+            case 0x14: // TakeDamage
+                var damagePacket = TakeDamagePacket.Deserialize(payload);
+                plr?.animator?.SetFloat("DamageDir X", damagePacket.DamageDirectionValue);
+                plr?.animator?.SetBool("Damaged", true); // Set bool, needs to be reset in NetworkedPlayer.Update
+                break;
+            case 0x15: // SetShardAnim
+                var shardPacket = SetShardAnimPacket.Deserialize(payload);
+                plr?.animator?.SetInteger("Shard Exit Type", shardPacket.AnimationId);
+                break;
+            case 0x16: // SetConfidence
+                var confidencePacket = SetConfidencePacket.Deserialize(payload);
+                plr?.animator?.SetFloat("Confidence", confidencePacket.ConfidenceValue);
+                break;
+            case 0x17: // PlayAnimation
+                var playPacket = PlayAnimationPacket.Deserialize(payload);
+                plr?.animator?.Play(playPacket.AnimationName, 0, 0f);
+                break;
+             case 0x18: // GrappleState
+                var grapplePacket = GrappleStatePacket.Deserialize(payload);
+                plr?.ApplyGrappleState(grapplePacket.IsGrappling, grapplePacket.GrappleVector); // New method in NetworkedPlayer
+                break;
 
-                    string receivedName = Encoding.UTF8.GetString(
-                        packetData,
-                        1,
-                        packetData.Length - 1
-                    );
-                    plr.playerName = receivedName;
-                    Debug.Log(
-                        $"[HasteTogether] Received name for {sourceSteamId}: {plr.playerName}"
-                    );
-                    break;
-
-                case 0x03: // Animation Packet Update (Changed ID)
-                    if (packetData.Length < 2) // Must contain at least the animation type + key length
-                    {
-                        Debug.LogWarning(
-                            $"[HasteTogether] Received malformed Animation packet (ID 0x03) from {sourceSteamId}. Length: {packetData.Length}"
-                        );
-                        break;
-                    }
-                    // Extract animation packet data (excluding the packet ID)
-                    byte[] animData = new byte[packetData.Length - 1];
-                    Buffer.BlockCopy(packetData, 1, animData, 0, animData.Length);
-
-                    AnimationPacket animPacket = AnimationPacket.Deserialize(animData);
-
-                    plr = Plugin.GetOrSetupPlayer(sourceSteamId);
-                    if (plr == null || plr.animator == null)
-                    {
-                        Debug.LogWarning(
-                            $"[HasteTogether] Received animation packet for player {sourceSteamId} but player or animator is missing."
-                        );
-                        break;
-                    }
-
-                    Animator animator = plr.animator;
-                    switch (animPacket.Type)
-                    {
-                        case AnimationPacket.SetTypes.Play:
-                            animator.Play(animPacket.AnimationKey);
-                            // Debug.Log($"[HasteTogether] Animation Play: {animPacket.AnimationKey} for {sourceSteamId}");
-                            break;
-                        case AnimationPacket.SetTypes.SetInteger:
-                            animator.SetInteger(
-                                animPacket.AnimationKey,
-                                Convert.ToInt32(animPacket.Value)
-                            );
-                            // Debug.Log($"[HasteTogether] Animation SetInteger: {animPacket.AnimationKey} = {animPacket.Value} for {sourceSteamId}");
-                            break;
-                        case AnimationPacket.SetTypes.SetBool:
-                            animator.SetBool(
-                                animPacket.AnimationKey,
-                                Convert.ToBoolean(animPacket.Value)
-                            );
-                            // Debug.Log($"[HasteTogether] Animation SetBool: {animPacket.AnimationKey} = {animPacket.Value} for {sourceSteamId}");
-                            break;
-                        case AnimationPacket.SetTypes.SetFloat:
-                            animator.SetFloat(
-                                animPacket.AnimationKey,
-                                Convert.ToSingle(animPacket.Value)
-                            );
-                            // Debug.Log($"[HasteTogether] Animation SetFloat: {animPacket.AnimationKey} = {animPacket.Value} for {sourceSteamId}");
-                            break;
-                        default:
-                            Debug.LogWarning(
-                                $"[HasteTogether] Unknown Animation type in packet from {sourceSteamId}"
-                            );
-                            break;
-                    }
-                    break;
-
-                default:
-                    Debug.LogWarning(
-                        $"[HasteTogether] Received unknown packet ID: {packetId} from {sourceSteamId}"
-                    );
-                    break;
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.LogError(
-                $"[HasteTogether] Error processing packet ID {packetId} from {sourceSteamId}: {ex}"
-            );
+            default:
+                Debug.LogWarning($"[HasteTogetherP2P] Received unknown packet ID: {packetId} from {sourceSteamId}");
+                break;
         }
     }
+    catch (Exception ex)
+    {
+        Debug.LogError($"[HasteTogetherP2P] Error processing packet ID {packetId} from {sourceSteamId}: {ex}");
+    }
+}
 
     // Map internal SendType enum to Steamworks.NET EP2PSend enum
     private EP2PSend MapSendType(SendType sendType)
@@ -1141,108 +1085,123 @@ public class NetworkedPlayer : MonoBehaviour
     public Animator animator = null!;
     private Vector3 targetPosition = Vector3.zero;
     private Quaternion targetRotation = Quaternion.identity;
-    private float interpolationSpeed = 15.0f; // Adjust for desired smoothness
-    private float positionThresholdSqr = 0.0001f; // Threshold to snap position
-    private float rotationThreshold = 0.5f; // Threshold to snap rotation (degrees)
+    private bool targetIsGrounded = false; // Store grounded state
 
+    private float interpolationSpeed = 15.0f;
+    private float positionThresholdSqr = 0.0001f;
+    private float rotationThreshold = 0.5f;
+
+    // For calculating velocity
+    private Vector3 previousPosition;
+    private float lastUpdateTime;
+
+    // For resetting bools
+    private float wallBounceResetTimer = 0f;
+    private float waveResetTimer = 0f;
+    private float damagedResetTimer = 0f;
+
+    // Player Name UI
     private string _playerName = "Loading...";
-    public string playerName
-    {
+    public string playerName { /* ... getter/setter remains the same ... */
         get => _playerName;
-        set
-        {
-            _playerName = value ?? "InvalidName";
-            gameObject.name = $"HasteTogether_{_playerName}_{steamId}";
-            if (playerNameText != null)
+            set
             {
-                playerNameText.text = _playerName;
-            }
-            else
-            {
-                SetupPlayerUI(); // Attempt setup if UI wasn't ready
+                _playerName = value ?? "InvalidName";
+                gameObject.name = $"HasteTogetherP2P_{_playerName}_{steamId}";
                 if (playerNameText != null)
+                {
                     playerNameText.text = _playerName;
+                }
+                else
+                {
+                    SetupPlayerUI(); // Attempt setup if UI wasn't ready
+                    if (playerNameText != null) playerNameText.text = _playerName;
+                }
             }
-        }
-    }
+     }
     public Canvas playerCanvas = null!;
     public TextMeshProUGUI playerNameText = null!;
 
     void Awake()
     {
+        // Initialize target transform to current transform
         targetPosition = transform.position;
         targetRotation = transform.rotation;
-        SetupPlayerUI(); // Attempt UI setup immediately
-        // Request name from Steam if not set yet (might be set by NamePacket later)
-        if (_playerName == "Loading...")
+        previousPosition = transform.position; // Init for velocity calc
+        lastUpdateTime = Time.time;
+        SetupPlayerUI();
+        if (_playerName == "Loading...") playerName = SteamFriends.GetFriendPersonaName(steamId);
+    }
+
+    // Renamed ApplyTransform to ApplyTransformAndState
+    public void ApplyTransformAndState(Vector3 position, Quaternion rotation, bool isGrounded)
+    {
+        targetPosition = position;
+        targetRotation = rotation;
+        targetIsGrounded = isGrounded; // Store the received grounded state
+    }
+
+     // New method to handle grapple state updates
+    public void ApplyGrappleState(bool isGrappling, Vector3 grappleVector)
+    {
+        if (animator != null)
         {
-            playerName = SteamFriends.GetFriendPersonaName(steamId);
+            animator.SetBool("Grapple", isGrappling);
+            if (isGrappling)
+            {
+                // Set vector components if grappling
+                animator.SetFloat("Grapple X", grappleVector.x);
+                animator.SetFloat("Grapple Y", grappleVector.y);
+                animator.SetFloat("Grapple Z", grappleVector.z);
+            }
         }
     }
 
-    // Apply received transform data (deserialization)
-    public void ApplyTransform(byte[] transformData)
-    {
-        if (transformData == null || transformData.Length < 15)
-        {
-            Debug.LogWarning($"[NetworkedPlayer {steamId}] Received invalid transform data.");
-            return;
-        }
-        // Position (24-bit ints -> float)
-        int xR = (transformData[0] << 16) | (transformData[1] << 8) | transformData[2];
-        int yR = (transformData[3] << 16) | (transformData[4] << 8) | transformData[5];
-        int zR = (transformData[6] << 16) | (transformData[7] << 8) | transformData[8];
-        targetPosition = new Vector3(
-            (xR / 256.0f) - 32767.5f,
-            (yR / 256.0f) - 32767.5f,
-            (zR / 256.0f) - 32767.5f
-        );
-        // Rotation (24-bit ints -> float for y, w)
-        int rY = (transformData[9] << 16) | (transformData[10] << 8) | transformData[11];
-        int rW = (transformData[12] << 16) | (transformData[13] << 8) | transformData[14];
-        // Convert back from [0, 16777215] to [-1, 1]
-        float rotY = (rY / 8388607.5f) - 1.0f;
-        float rotW = (rW / 8388607.5f) - 1.0f;
-        // Reconstruct quaternion (assuming x/z are derived or 0)
-        float y2 = rotY * rotY;
-        float w2 = rotW * rotW;
-        float xzSumSq = 1.0f - y2 - w2;
-        float rotX = 0.0f;
-        float rotZ = (xzSumSq < 0.0f) ? 0.0f : Mathf.Sqrt(xzSumSq);
-        targetRotation = new Quaternion(rotX, rotY, rotZ, rotW).normalized;
-    }
 
     private void Update()
     {
-        // Interpolate position
-        if ((transform.position - targetPosition).sqrMagnitude > positionThresholdSqr)
+        // --- Interpolation ---
+        float lerpFactor = Time.deltaTime * interpolationSpeed;
+        transform.position = Vector3.Lerp(transform.position, targetPosition, lerpFactor);
+        transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, lerpFactor);
+
+        // --- Animator Updates ---
+        if (animator != null)
         {
-            transform.position = Vector3.Lerp(
-                transform.position,
-                targetPosition,
-                Time.deltaTime * interpolationSpeed
-            );
-        }
-        else
-        {
-            transform.position = targetPosition; // Snap if close
+            // Calculate velocity based on interpolated movement
+            float timeSinceUpdate = Time.time - lastUpdateTime;
+            Vector3 currentVelocity = Vector3.zero;
+            if (timeSinceUpdate > 0.01f) // Avoid division by zero and use threshold
+            {
+                 // Use target position for velocity calc to reflect incoming data more closely
+                currentVelocity = (targetPosition - previousPosition) / timeSinceUpdate;
+                previousPosition = targetPosition; // Update previous position based on target
+                lastUpdateTime = Time.time;
+            }
+             else {
+                 // If no recent update, estimate velocity based on current movement
+                 currentVelocity = (transform.position - previousPosition) / Time.deltaTime;
+                 previousPosition = transform.position; // Update based on current interpolated pos
+             }
+
+
+            // Set basic movement parameters
+            animator.SetFloat("Speed", currentVelocity.magnitude / 100f); // Adjust divisor based on game scale
+            animator.SetFloat("Velocity Y", currentVelocity.y);
+            animator.SetBool("Is Grounded", targetIsGrounded); // Use the synced grounded state
+
+            // TODO: Set Relative Input X/Y based on velocity relative to player forward if needed
+            // Vector3 localVel = transform.InverseTransformDirection(currentVelocity);
+            // animator.SetFloat("Relative Input X", localVel.x * someFactor);
+            // animator.SetFloat("Relative Input Y", localVel.z * someFactor);
+
+            // Reset temporary bools after a short delay
+            ResetAnimatorBool("Wall Bounce", ref wallBounceResetTimer);
+            ResetAnimatorBool("Wave", ref waveResetTimer);
+            ResetAnimatorBool("Damaged", ref damagedResetTimer);
         }
 
-        // Interpolate rotation
-        if (Quaternion.Angle(transform.rotation, targetRotation) > rotationThreshold)
-        {
-            transform.rotation = Quaternion.Slerp(
-                transform.rotation,
-                targetRotation,
-                Time.deltaTime * interpolationSpeed
-            );
-        }
-        else
-        {
-            transform.rotation = targetRotation; // Snap if close
-        }
-
-        // Make player name canvas face the camera
+        // --- UI Update ---
         if (playerCanvas != null && Camera.main != null)
         {
             playerCanvas.transform.LookAt(
@@ -1252,697 +1211,93 @@ public class NetworkedPlayer : MonoBehaviour
         }
     }
 
-    // Sets up the in-world UI canvas and text for the player's name
+    // Helper to reset animator bools after a delay
+    private void ResetAnimatorBool(string boolName, ref float timer)
+    {
+        if (animator.GetBool(boolName))
+        {
+            timer += Time.deltaTime;
+            if (timer > 0.1f) // Reset after 0.1 seconds
+            {
+                animator.SetBool(boolName, false);
+                timer = 0f;
+            }
+        } else {
+            timer = 0f; // Reset timer if bool is already false
+        }
+    }
+
+
+    // SetupPlayerUI and OnDestroy remain the same
     void SetupPlayerUI()
     {
-        if (playerCanvas != null || !this.enabled)
-            return; // Already setup or component disabled
+         if (playerCanvas != null || !this.enabled) return; // Already setup or component disabled
 
-        try
-        {
-            // Create Canvas GameObject
-            GameObject canvasGO = new GameObject("PlayerCanvas");
-            canvasGO.transform.SetParent(transform, false);
+            try
+            {
+                // Create Canvas GameObject
+                GameObject canvasGO = new GameObject("PlayerCanvas");
+                canvasGO.transform.SetParent(transform, false);
 
-            playerCanvas = canvasGO.AddComponent<Canvas>();
-            playerCanvas.renderMode = RenderMode.WorldSpace;
-            playerCanvas.sortingOrder = 1;
+                playerCanvas = canvasGO.AddComponent<Canvas>();
+                playerCanvas.renderMode = RenderMode.WorldSpace;
+                playerCanvas.sortingOrder = 1;
 
-            RectTransform canvasRect = canvasGO.GetComponent<RectTransform>();
-            canvasRect.localPosition = new Vector3(0, 2.5f, 0); // Position above head
-            canvasRect.sizeDelta = new Vector2(200, 50);
-            canvasRect.localScale = new Vector3(0.01f, 0.01f, 0.01f); // Scale for world space
+                RectTransform canvasRect = canvasGO.GetComponent<RectTransform>();
+                canvasRect.localPosition = new Vector3(0, 2.5f, 0); // Position above head
+                canvasRect.sizeDelta = new Vector2(200, 50);
+                canvasRect.localScale = new Vector3(0.01f, 0.01f, 0.01f); // Scale for world space
 
-            // Create Text GameObject
-            GameObject textGO = new GameObject("NametagText");
-            textGO.transform.SetParent(playerCanvas.transform, false);
+                // Create Text GameObject
+                GameObject textGO = new GameObject("NametagText");
+                textGO.transform.SetParent(playerCanvas.transform, false);
 
-            playerNameText = textGO.AddComponent<TextMeshProUGUI>();
-            playerNameText.text = playerName; // Set initial text
-            playerNameText.fontSize = 24;
-            playerNameText.color = UnityEngine.Color.white;
-            playerNameText.alignment = TextAlignmentOptions.Center;
-            playerNameText.enableWordWrapping = false;
-            playerNameText.overflowMode = TextOverflowModes.Overflow;
-            playerNameText.fontStyle = FontStyles.Bold;
+                playerNameText = textGO.AddComponent<TextMeshProUGUI>();
+                playerNameText.text = playerName; // Set initial text
+                playerNameText.fontSize = 24;
+                playerNameText.color = UnityEngine.Color.white;
+                playerNameText.alignment = TextAlignmentOptions.Center;
+                playerNameText.enableWordWrapping = false;
+                playerNameText.overflowMode = TextOverflowModes.Overflow;
+                playerNameText.fontStyle = FontStyles.Bold;
 
-            // Assign default font
-            if (TMP_Settings.defaultFontAsset != null)
-                playerNameText.font = TMP_Settings.defaultFontAsset;
-            else
-                Debug.LogWarning(
-                    "[HasteTogether] TMP Default Font Asset is null. Nametag may not render."
-                );
+                // Assign default font
+                if (TMP_Settings.defaultFontAsset != null)
+                    playerNameText.font = TMP_Settings.defaultFontAsset;
+                else
+                    Debug.LogWarning("[HasteTogetherP2P] TMP Default Font Asset is null. Nametag may not render.");
 
-            RectTransform textRect = textGO.GetComponent<RectTransform>();
-            textRect.localPosition = Vector3.zero;
-            textRect.sizeDelta = canvasRect.sizeDelta;
-            textRect.localScale = Vector3.one;
+                RectTransform textRect = textGO.GetComponent<RectTransform>();
+                textRect.localPosition = Vector3.zero;
+                textRect.sizeDelta = canvasRect.sizeDelta;
+                textRect.localScale = Vector3.one;
 
-            playerNameText.ForceMeshUpdate(); // Update mesh
+                playerNameText.ForceMeshUpdate(); // Update mesh
 
-            Debug.Log($"[HasteTogether] Setup UI for {steamId}");
-        }
-        catch (Exception e)
-        {
-            Debug.LogError($"[HasteTogether] Error setting up player UI for {steamId}: {e}");
-            if (playerCanvas != null)
-                Destroy(playerCanvas.gameObject);
-            playerCanvas = null!;
-            playerNameText = null!;
-        }
+                Debug.Log($"[HasteTogetherP2P] Setup UI for {steamId}");
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[HasteTogetherP2P] Error setting up player UI for {steamId}: {e}");
+                if (playerCanvas != null) Destroy(playerCanvas.gameObject);
+                playerCanvas = null!;
+                playerNameText = null!;
+            }
     }
-
     void OnDestroy()
     {
-        if (playerCanvas != null)
-        {
-            Destroy(playerCanvas.gameObject);
-        }
+         if (playerCanvas != null)
+            {
+                Destroy(playerCanvas.gameObject);
+            }
     }
 }
 
-// --- Packets ---
-// (Packet base class, UpdatePacket, NamePacket, AnimationPacket definitions go here - provided in previous response)
-// --- Packets ---
-// Base Packet class remains mostly the same, just update Send methods
-public abstract class Packet
-{
-    public abstract byte PacketID();
-    public abstract byte[] Serialize();
 
-    // Helper to map internal enum to Steamworks enum
-    protected EP2PSend MapSteamSendType(SendType sendType)
-    {
-        switch (sendType)
-        {
-            case SendType.Reliable:
-                return EP2PSend.k_EP2PSendReliable;
-            case SendType.Unreliable:
-            default:
-                return EP2PSend.k_EP2PSendUnreliableNoDelay; // Good default for game data
-        }
-    }
+// --- Settings Classes --- ///
 
-    // Prepares the full byte array with Packet ID prefix
-    protected byte[] GetBytesToSend()
-    {
-        byte[] data = Serialize();
-        byte[] toSend = new byte[data.Length + 1];
-        toSend[0] = PacketID(); // Add packet ID header
-        Buffer.BlockCopy(data, 0, toSend, 1, data.Length);
-        return toSend;
-    }
 
-    public void Broadcast(SendType sendType = SendType.Unreliable)
-    {
-        if (Plugin.networkManager == null || !Plugin.networkManager.IsInLobby)
-            return;
-
-        byte[] toSend = GetBytesToSend();
-        Plugin.networkManager.Broadcast(toSend, sendType); // Use NetworkManager's broadcast
-    }
-
-    public void SendTo(CSteamID targetSteamId, SendType sendType = SendType.Unreliable) // Use CSteamID
-    {
-        if (Plugin.networkManager == null || !Plugin.networkManager.IsInLobby)
-            return;
-
-        byte[] toSend = GetBytesToSend();
-        Plugin.networkManager.SendTo(targetSteamId, toSend, sendType); // Use NetworkManager's SendTo
-    }
-}
-
-// UpdatePacket remains the same internally, relies on base class Send methods
-public class UpdatePacket : Packet
-{
-    public override byte PacketID() => 0x01;
-
-    private Vector3 position;
-    private Quaternion rotation;
-
-    // Serialization uses the static Plugin method, which is unchanged
-    public override byte[] Serialize() => Plugin.SerializeTransform(position, rotation);
-
-    // Comparison logic remains the same
-    public bool HasChanged(
-        UpdatePacket previousPacket,
-        float posThresholdSqr = 0.0001f, // Use squared threshold for position
-        float rotThreshold = 0.1f
-    )
-    {
-        if (previousPacket == null)
-            return true;
-        // Compare position using squared magnitude for efficiency
-        if ((position - previousPacket.position).sqrMagnitude > posThresholdSqr)
-            return true;
-        // Compare rotation using Quaternion.Angle
-        if (Quaternion.Angle(rotation, previousPacket.rotation) > rotThreshold)
-            return true;
-        return false;
-    }
-
-    // Constructor logic remains the same
-    public UpdatePacket(Transform player)
-    {
-        this.position = player.position;
-        // Attempt to get visual rotation if component exists
-        var visualRotation = player.GetComponent<PlayerVisualRotation>(); // Assuming this component exists
-        this.rotation = visualRotation != null ? visualRotation.visual.rotation : player.rotation;
-    }
-
-    // Default constructor remains the same
-    public UpdatePacket()
-    {
-        this.position = Vector3.zero;
-        this.rotation = Quaternion.identity;
-    }
-}
-
-// NamePacket remains the same internally, relies on base class Send methods
-public class NamePacket : Packet
-{
-    private string name;
-
-    public override byte PacketID() => 0x02; // ID is 0x02
-
-    // Serialization uses UTF8 encoding, which is standard
-    public override byte[] Serialize() => Encoding.UTF8.GetBytes(name);
-
-    // Constructor ensures name is not null
-    public NamePacket(string name)
-    {
-        this.name = name ?? "UnknownPlayer"; // Provide a default if null
-    }
-}
-
-// AnimationPacket definition
-public class AnimationPacket : Packet
-{
-    public enum SetTypes : byte
-    {
-        Play = 0x00,
-        SetInteger = 0x01,
-        SetBool = 0x02,
-        SetFloat = 0x03,
-    }
-
-    public SetTypes Type;
-    public string AnimationKey; // For Play, this is the state name
-    public object Value; // For properties (integers, bools, floats)
-
-    public AnimationPacket(SetTypes type, string key, object value)
-    {
-        Type = type;
-        AnimationKey = key;
-        Value = value;
-    }
-
-    public override byte PacketID() => 0x03; // ID is 0x03
-
-    public override byte[] Serialize()
-    {
-        byte[] keyBytes = Encoding.UTF8.GetBytes(AnimationKey);
-        byte keyLength = (byte)keyBytes.Length;
-        byte[] valueBytes;
-
-        switch (Type)
-        {
-            case SetTypes.SetInteger:
-                valueBytes = BitConverter.GetBytes(Convert.ToInt32(Value));
-                break;
-            case SetTypes.SetBool:
-                valueBytes = new byte[] { Convert.ToBoolean(Value) ? (byte)1 : (byte)0 };
-                break;
-            case SetTypes.SetFloat:
-                valueBytes = BitConverter.GetBytes(Convert.ToSingle(Value));
-                break;
-            case SetTypes.Play:
-            default:
-                valueBytes = new byte[0];
-                break;
-        }
-
-        byte[] packet = new byte[1 + 1 + keyBytes.Length + valueBytes.Length];
-        packet[0] = (byte)Type;
-        packet[1] = keyLength;
-        Buffer.BlockCopy(keyBytes, 0, packet, 2, keyBytes.Length);
-        if (valueBytes.Length > 0)
-            Buffer.BlockCopy(valueBytes, 0, packet, 2 + keyBytes.Length, valueBytes.Length);
-        return packet;
-    }
-
-    public static AnimationPacket Deserialize(byte[] data)
-    {
-        if (data.Length < 2)
-            throw new Exception("Invalid AnimationPacket: insufficient data.");
-        SetTypes type = (SetTypes)data[0];
-        byte keyLength = data[1];
-        if (data.Length < 2 + keyLength)
-            throw new Exception("Invalid AnimationPacket: incomplete key.");
-        string key = Encoding.UTF8.GetString(data, 2, keyLength);
-        object value = null;
-        int valueIndex = 2 + keyLength;
-        switch (type)
-        {
-            case SetTypes.SetInteger:
-                if (data.Length < valueIndex + 4)
-                    throw new Exception("Invalid AnimationPacket: insufficient integer data.");
-                value = BitConverter.ToInt32(data, valueIndex);
-                break;
-            case SetTypes.SetBool:
-                if (data.Length < valueIndex + 1)
-                    throw new Exception("Invalid AnimationPacket: insufficient bool data.");
-                value = data[valueIndex] == 1;
-                break;
-            case SetTypes.SetFloat:
-                if (data.Length < valueIndex + 4)
-                    throw new Exception("Invalid AnimationPacket: insufficient float data.");
-                value = BitConverter.ToSingle(data, valueIndex);
-                break;
-        }
-        return new AnimationPacket(type, key, value);
-    }
-
-    public override bool Equals(object obj)
-    {
-        if (!(obj is AnimationPacket other))
-            return false;
-        if (Type != other.Type || !AnimationKey.Equals(other.AnimationKey))
-            return false;
-        if (Type == SetTypes.SetFloat)
-            return Math.Abs(Convert.ToSingle(Value) - Convert.ToSingle(other.Value)) < 0.01f;
-        return Equals(Value, other.Value);
-    }
-
-    public override int GetHashCode() => HashCode.Combine(Type, AnimationKey, Value);
-}
-
-// --- HookManager (Using MonoMod) ---
-public static class HookManager
-{
-    // Delegate/Hook fields for PlayerCharacter.Update, PersistentObjects.Awake, SteamAPI.RestartAppIfNecessary
-    private delegate void PlayerCharacter_UpdateDelegate(PlayerCharacter self);
-    private static Hook? hookPlayerUpdate;
-    private static PlayerCharacter_UpdateDelegate? orig_PlayerCharacter_Update;
-
-    private delegate void PersistentObjects_AwakeDelegate(PersistentObjects self);
-    private static Hook? hookPersistentAwake;
-    private static PersistentObjects_AwakeDelegate? orig_PersistentObjects_Awake;
-
-    private delegate bool RestartAppDelegate(AppId_t appId);
-    private static Hook? hookRestartApp;
-    private static RestartAppDelegate? orig_RestartApp;
-
-    // Delegate/Hook fields for Animator methods
-    private delegate void Animator_PlayDelegate(
-        Animator self,
-        string stateName,
-        int layer,
-        float normalizedTime
-    );
-    private static Hook? hookAnimatorPlay;
-    private static Animator_PlayDelegate? orig_Animator_Play;
-
-    private delegate void Animator_SetIntegerDelegate(Animator self, string name, int value);
-    private static Hook? hookAnimatorSetInteger;
-    private static Animator_SetIntegerDelegate? orig_Animator_SetInteger;
-
-    private delegate void Animator_SetBoolDelegate(Animator self, string name, bool value);
-    private static Hook? hookAnimatorSetBool;
-    private static Animator_SetBoolDelegate? orig_Animator_SetBool;
-
-    private delegate void Animator_SetFloatDelegate(Animator self, string name, float value);
-    private static Hook? hookAnimatorSetFloat;
-    private static Animator_SetFloatDelegate? orig_Animator_SetFloat;
-
-    // Helper to check if an animator belongs to the local player
-    private static bool IsLocalPlayerAnimator(Animator animator)
-    {
-        // TODO: Implement your actual check here. Example:
-        // PlayerCharacter localPlayer = PlayerCharacter.localPlayer; // Or however you get the local player instance
-        // return localPlayer != null && animator == localPlayer.refs?.animationHandler?.animator;
-        return true; // Placeholder - REMOVE THIS AND IMPLEMENT PROPER CHECK
-    }
-
-    // Detour methods for Animator hooks
-    private static void Animator_PlayDetour(
-        Animator self,
-        string stateName,
-        int layer,
-        float normalizedTime
-    )
-    {
-        orig_Animator_Play?.Invoke(self, stateName, layer, normalizedTime); // Call original first
-        if (IsLocalPlayerAnimator(self))
-        {
-            // Use the static helper to send if changed
-            Plugin.SendAnimationPacketIfNeeded(
-                new AnimationPacket(AnimationPacket.SetTypes.Play, stateName, null) // Key is stateName for Play
-            );
-        }
-    }
-
-    private static void Animator_SetIntegerDetour(Animator self, string name, int value)
-    {
-        orig_Animator_SetInteger?.Invoke(self, name, value);
-        if (IsLocalPlayerAnimator(self))
-        {
-            Plugin.SendAnimationPacketIfNeeded(
-                new AnimationPacket(AnimationPacket.SetTypes.SetInteger, name, value)
-            );
-        }
-    }
-
-    private static void Animator_SetBoolDetour(Animator self, string name, bool value)
-    {
-        orig_Animator_SetBool?.Invoke(self, name, value);
-        if (IsLocalPlayerAnimator(self))
-        {
-            Plugin.SendAnimationPacketIfNeeded(
-                new AnimationPacket(AnimationPacket.SetTypes.SetBool, name, value)
-            );
-        }
-    }
-
-    private static void Animator_SetFloatDetour(Animator self, string name, float value)
-    {
-        orig_Animator_SetFloat?.Invoke(self, name, value);
-        if (IsLocalPlayerAnimator(self))
-        {
-            Plugin.SendAnimationPacketIfNeeded(
-                new AnimationPacket(AnimationPacket.SetTypes.SetFloat, name, value)
-            );
-        }
-    }
-
-    // Installs all hooks
-    public static void InstallHooks()
-    {
-        Debug.Log("[HasteTogether] Installing hooks...");
-        InstallHook(
-            "PlayerCharacter.Update",
-            typeof(PlayerCharacter),
-            "Update",
-            ref hookPlayerUpdate,
-            ref orig_PlayerCharacter_Update,
-            PlayerCharacter_UpdateDetour
-        );
-        InstallHook(
-            "PersistentObjects.Awake",
-            typeof(PersistentObjects),
-            "Awake",
-            ref hookPersistentAwake,
-            ref orig_PersistentObjects_Awake,
-            PersistentObjects_AwakeDetour
-        );
-        InstallHook(
-            "SteamAPI.RestartAppIfNecessary",
-            typeof(SteamAPI),
-            "RestartAppIfNecessary",
-            ref hookRestartApp,
-            ref orig_RestartApp,
-            RestartAppDetour,
-            BindingFlags.Static | BindingFlags.Public
-        );
-
-        // Install Animator Hooks
-        InstallHook(
-            "Animator.Play",
-            typeof(Animator),
-            "Play",
-            ref hookAnimatorPlay,
-            ref orig_Animator_Play,
-            Animator_PlayDetour,
-            BindingFlags.Instance | BindingFlags.Public,
-            new Type[] { typeof(string), typeof(int), typeof(float) }
-        );
-        InstallHook(
-            "Animator.SetInteger",
-            typeof(Animator),
-            "SetInteger",
-            ref hookAnimatorSetInteger,
-            ref orig_Animator_SetInteger,
-            Animator_SetIntegerDetour,
-            BindingFlags.Instance | BindingFlags.Public,
-            new Type[] { typeof(string), typeof(int) }
-        );
-        InstallHook(
-            "Animator.SetBool",
-            typeof(Animator),
-            "SetBool",
-            ref hookAnimatorSetBool,
-            ref orig_Animator_SetBool,
-            Animator_SetBoolDetour,
-            BindingFlags.Instance | BindingFlags.Public,
-            new Type[] { typeof(string), typeof(bool) }
-        );
-        InstallHook(
-            "Animator.SetFloat",
-            typeof(Animator),
-            "SetFloat",
-            ref hookAnimatorSetFloat,
-            ref orig_Animator_SetFloat,
-            Animator_SetFloatDetour,
-            BindingFlags.Instance | BindingFlags.Public,
-            new Type[] { typeof(string), typeof(float) }
-        );
-    }
-
-    // Generic Hook Installation Helper
-    private static void InstallHook<TDelegate>(
-        string hookName,
-        Type targetType,
-        string methodName,
-        ref Hook? hookField,
-        ref TDelegate? origField,
-        TDelegate detourDelegate,
-        BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-        Type[]? parameterTypes = null
-    )
-        where TDelegate : Delegate
-    {
-        MethodInfo? methodInfo =
-            parameterTypes == null
-                ? targetType.GetMethod(methodName, flags)
-                : targetType.GetMethod(methodName, flags, null, parameterTypes, null);
-
-        if (methodInfo != null)
-        {
-            try
-            {
-                hookField = new Hook(methodInfo, detourDelegate);
-                origField = hookField.GenerateTrampoline<TDelegate>();
-                Debug.Log($"[HasteTogether] Hooked {hookName} successfully.");
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[HasteTogether] Failed to hook {hookName}: {ex}");
-            }
-        }
-        else
-        {
-            Debug.LogError(
-                $"[HasteTogether] Could not find method for hook: {hookName} in {targetType.FullName}"
-            );
-        }
-    }
-
-    // --- Detour Methods ---
-    private static void PlayerCharacter_UpdateDetour(PlayerCharacter self)
-    {
-        orig_PlayerCharacter_Update?.Invoke(self); // Call original first
-        try
-        {
-            // Send position updates if in a lobby and local player
-            if (
-                Plugin.networkManager != null
-                && Plugin.networkManager.IsInLobby /*&& self.IsLocalPlayer*/
-            ) // Assuming IsLocalPlayer exists
-            {
-                UpdatePacket packet = new UpdatePacket(self.transform);
-                if (packet.HasChanged(Plugin.lastSent, 0.0001f, 0.1f))
-                {
-                    packet.Broadcast(SendType.Unreliable);
-                    Plugin.lastSent = packet;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.LogError($"[HasteTogether] Error in PlayerCharacter_UpdateDetour: {ex}");
-        }
-    }
-
-    private static void PersistentObjects_AwakeDetour(PersistentObjects self)
-    {
-        Debug.Log("[HasteTogether] PersistentObjects_AwakeDetour called.");
-        orig_PersistentObjects_Awake?.Invoke(self); // Call original first
-        Debug.Log("[HasteTogether] Original PersistentObjects.Awake finished.");
-
-        // --- UI Setup Logic ---
-        if (self == null || self.gameObject == null)
-        {
-            Debug.LogWarning(
-                "[HasteTogether] PersistentObjects instance is null after Awake. Skipping UI setup."
-            );
-            return;
-        }
-        Transform? persistentUIRoot = self.transform.Find("UI_Persistent");
-        if (persistentUIRoot == null)
-        {
-            Debug.LogWarning(
-                "[HasteTogether] 'UI_Persistent' not found under PersistentObjects. Creating..."
-            );
-            // Create basic UI root if missing (adapt as needed for the game's UI structure)
-            GameObject uiRootObj = new GameObject("UI_Persistent");
-            persistentUIRoot = uiRootObj.transform;
-            persistentUIRoot.SetParent(self.transform, false);
-            Canvas rootCanvas =
-                uiRootObj.GetComponent<Canvas>() ?? uiRootObj.AddComponent<Canvas>();
-            rootCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            if (uiRootObj.GetComponent<CanvasScaler>() == null)
-                uiRootObj.AddComponent<CanvasScaler>();
-            if (uiRootObj.GetComponent<GraphicRaycaster>() == null)
-                uiRootObj.AddComponent<GraphicRaycaster>();
-        }
-
-        if (Plugin.TogetherUI == null && persistentUIRoot != null)
-        {
-            try
-            {
-                Plugin.TogetherUI = new GameObject("TogetherP2P_UI").transform;
-                Plugin.TogetherUI.SetParent(persistentUIRoot, false);
-                Plugin.TogetherUI.localPosition = Vector3.zero;
-                Plugin.TogetherUI.localScale = Vector3.one;
-                Debug.Log("[HasteTogether] Created TogetherP2P_UI root under UI_Persistent.");
-
-                // Create Lobby Status Image
-                GameObject statusImgObj = new GameObject("LobbyStatusImage");
-                statusImgObj.transform.SetParent(Plugin.TogetherUI, false);
-                Image statusImage = statusImgObj.AddComponent<Image>();
-                RectTransform imgRect = statusImgObj.GetComponent<RectTransform>();
-                imgRect.anchorMin = new Vector2(1, 1);
-                imgRect.anchorMax = new Vector2(1, 1);
-                imgRect.pivot = new Vector2(1, 1);
-                imgRect.anchoredPosition = new Vector2(-20, -20); // Top-right corner offset
-                imgRect.sizeDelta = new Vector2(64, 64);
-                statusImage.preserveAspect = true;
-
-                LobbyStatusUI statusUI = statusImgObj.AddComponent<LobbyStatusUI>();
-                statusUI.img = statusImage;
-                // Load sprites (ensure resource names are correct and embedded)
-                statusUI.inLobbySprite = LoadSpriteFromResource(
-                    "HasteTogether.P2P.Graphics.HasteTogether_Connected.png"
-                );
-                statusUI.notInLobbySprite = LoadSpriteFromResource(
-                    "HasteTogether.P2P.Graphics.HasteTogether_Disconnected.png"
-                );
-                if (statusUI.inLobbySprite == null || statusUI.notInLobbySprite == null)
-                    Debug.LogError("[HasteTogether] Failed to load status sprites!");
-
-                // Create Lobby ID Text
-                GameObject lobbyIdObj = new GameObject("LobbyIdText");
-                lobbyIdObj.transform.SetParent(Plugin.TogetherUI, false);
-                TextMeshProUGUI lobbyText = lobbyIdObj.AddComponent<TextMeshProUGUI>();
-                RectTransform textRect = lobbyIdObj.GetComponent<RectTransform>();
-                textRect.anchorMin = new Vector2(1, 1);
-                textRect.anchorMax = new Vector2(1, 1);
-                textRect.pivot = new Vector2(1, 1);
-                textRect.anchoredPosition = new Vector2(-100, -25); // Near image
-                textRect.sizeDelta = new Vector2(300, 30);
-                lobbyText.fontSize = 14;
-                lobbyText.color = Color.white;
-                lobbyText.alignment = TextAlignmentOptions.TopRight;
-                lobbyText.text = "Initializing...";
-                if (TMP_Settings.defaultFontAsset != null)
-                    lobbyText.font = TMP_Settings.defaultFontAsset;
-                statusUI.lobbyIdText = lobbyText;
-
-                Debug.Log("[HasteTogether] Persistent UI setup attempt complete.");
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[HasteTogether] Error setting up TogetherP2P_UI: {ex}");
-                if (Plugin.TogetherUI != null)
-                    GameObject.Destroy(Plugin.TogetherUI.gameObject);
-                Plugin.TogetherUI = null!;
-            }
-        }
-        else if (Plugin.TogetherUI != null)
-            Debug.LogWarning("[HasteTogether] TogetherP2P_UI already exists.");
-        else
-            Debug.LogError(
-                "[HasteTogether] Cannot setup UI - Persistent UI Root not found/created."
-            );
-    }
-
-    private static bool RestartAppDetour(AppId_t appId)
-    {
-        Debug.LogWarning(
-            $"[HasteTogether] SteamAPI.RestartAppIfNecessary called for AppId: {appId}. Preventing restart."
-        );
-        return false; // Prevent the restart
-    }
-
-    // Helper to load Sprites from Embedded Resources
-    private static Sprite? LoadSpriteFromResource(string resourceName)
-    {
-        try
-        {
-            Assembly executingAssembly = Assembly.GetExecutingAssembly();
-            using Stream? imgStream = executingAssembly.GetManifestResourceStream(resourceName);
-            if (imgStream == null)
-            {
-                string available = string.Join(", ", executingAssembly.GetManifestResourceNames());
-                Debug.LogError(
-                    $"[HasteTogether] Embedded resource not found: {resourceName}. Available: {available}"
-                );
-                return null;
-            }
-            using MemoryStream ms = new MemoryStream();
-            imgStream.CopyTo(ms);
-            byte[] buffer = ms.ToArray();
-            Texture2D texture = new Texture2D(2, 2, TextureFormat.RGBA32, false)
-            {
-                filterMode = FilterMode.Point, // Good for pixel art UI
-                wrapMode = TextureWrapMode.Clamp,
-            };
-            if (texture.LoadImage(buffer))
-            {
-                Sprite sprite = Sprite.Create(
-                    texture,
-                    new Rect(0, 0, texture.width, texture.height),
-                    new Vector2(0.5f, 0.5f),
-                    100.0f
-                );
-                sprite.name = resourceName;
-                return sprite;
-            }
-            else
-            {
-                Debug.LogError(
-                    $"[HasteTogether] Failed to load image data from resource: {resourceName}"
-                );
-                GameObject.Destroy(texture);
-                return null;
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.LogError(
-                $"[HasteTogether] Exception loading sprite from resource '{resourceName}': {ex}"
-            );
-            return null;
-        }
-    }
-}
-
-// --- Settings Classes ---
-// (Includes LobbyCreationOptionsSetting, JoinLobbySettingGroup, PublicLobbyListSetting and their children)
-// --- Settings Classes ---
-
-// --- Lobby Creation Settings ---
+// Lobby Creation Settings
 public enum LobbyCreationType
 {
     Private,
