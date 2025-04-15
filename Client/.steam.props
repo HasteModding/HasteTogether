@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Steam Path Setup -->
+  <PropertyGroup>
+    <!-- On Windows: attempt to get the Steam install location from the registry -->
+		<_SteamRegPath
+        >HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Valve\Steam</_SteamRegPath>
+		<SteamInstallPathFromRegistry
+            Condition="'$(OS)' == 'Windows_NT'"
+        >$([MSBuild]::GetRegistryValueFromView('$(_SteamRegPath)', 'InstallPath', null, RegistryView.Registry32))</SteamInstallPathFromRegistry>
+
+    <!-- Use the registry value if available -->
+    <SteamDir
+            Condition="'$(OS)' == 'Windows_NT' and '$(SteamInstallPathFromRegistry)' != ''"
+        >
+      $([MSBuild]::NormalizePath('$(SteamInstallPathFromRegistry)', 'steamapps'))
+    </SteamDir>
+
+    <!-- Default for Windows if registry lookup fails -->
+    <SteamDir
+            Condition="'$(OS)' == 'Windows_NT' and '$(SteamInstallPathFromRegistry)' == ''"
+        >
+      $([MSBuild]::NormalizePath('C:', 'Program Files (x86)', 'Steam', 'steamapps'))
+    </SteamDir>
+
+    <!-- Default for non-Windows -->
+    <SteamDir
+            Condition="'$(OS)' != 'Windows_NT'"
+        >$(HOME)/.steam/steam/steamapps</SteamDir>
+
+    <!-- Haste's App ID -->
+    <HasteAppId>1796470</HasteAppId>
+		<HarmonyWorkshopId>3408901301</HarmonyWorkshopId>
+		<SettingsLibWorkshopId>3462196533</SettingsLibWorkshopId>
+
+		<EnableHarmony Condition="'$(EnableHarmony)'==''">false</EnableHarmony>
+		<EnableSettingsLib
+            Condition="'$(EnableSettingsLib)'==''"
+        >false</EnableSettingsLib>
+  </PropertyGroup>
+
+  <!-- Compute the path to the libraryfolders.vdf file -->
+  <PropertyGroup>
+    <CleanSteamDir
+        >$([System.Text.RegularExpressions.Regex]::Replace('$(SteamDir)', '^\s+|\s+$', ''))</CleanSteamDir>
+		<LibraryFoldersFile
+        >$([MSBuild]::NormalizePath('$(CleanSteamDir)', 'libraryfolders.vdf'))</LibraryFoldersFile>
+  </PropertyGroup>
+
+  <!-- Settings that don't depend on file contents -->
+  <PropertyGroup>
+    <DisableImplicitFrameworkReferences
+        >true</DisableImplicitFrameworkReferences>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+  </PropertyGroup>
+
+  <!-- Target to extract and set the Steam library paths -->
+  <Target
+        Name="ProcessSteamLibraryPaths"
+        BeforeTargets="ResolveAssemblyReferences"
+    >
+    <!-- Read the libraryfolders.vdf file -->
+    <ReadLinesFromFile
+            File="$(LibraryFoldersFile)"
+            Condition="Exists('$(LibraryFoldersFile)')"
+        >
+      <Output TaskParameter="Lines" PropertyName="LibraryFileContent" />
+    </ReadLinesFromFile>
+
+    <!-- Extract the Steam library path that contains Haste -->
+    <PropertyGroup>
+      <!-- Look for the section with the HasteAppId and extract the path -->
+      <LibraryPathMatch
+            >$([System.Text.RegularExpressions.Regex]::Match('$(LibraryFileContent)', '.*"path"\s+"([^"]+)".*"$(HasteAppId)"\s+').Groups[1].Value)</LibraryPathMatch>
+
+      <!-- If we found a match, use it; otherwise try to extract any path -->
+      <SteamLibraryPath
+                Condition="'$(LibraryPathMatch)' != ''"
+            >$(LibraryPathMatch)</SteamLibraryPath>
+      <SteamLibraryPath
+                Condition="'$(LibraryPathMatch)' == ''"
+            >$([System.Text.RegularExpressions.Regex]::Match('$(LibraryFileContent)', '.*"path"\s+"([^"]+)"').Groups[1].Value)</SteamLibraryPath>
+
+      <!-- Set HasteDir and Managed DLLs path -->
+      <HasteDir>$([MSBuild]::NormalizePath('$(SteamLibraryPath)', 'steamapps', 'common', 'Haste'))</HasteDir>
+      <HasteManagedDir>$([MSBuild]::NormalizePath('$(HasteDir)', 'Haste_Data', 'Managed'))</HasteManagedDir>
+      <WorkshopDir>$([MSBuild]::NormalizePath('$(SteamLibraryPath)', 'steamapps', 'workshop', 'content', '$(HasteAppId)'))</WorkshopDir>
+      <HarmonyWorkshopDir>$([MSBuild]::NormalizePath('$(WorkshopDir)', '$(HarmonyWorkshopId)', '0Harmony.dll'))</HarmonyWorkshopDir>
+      <SettingsLibDir Condition="'$(SettingsLibDir)' == ''">$([MSBuild]::NormalizePath('$(WorkshopDir)', '$(SettingsLibWorkshopId)', 'SettingsLib.dll'))</SettingsLibDir>
+    </PropertyGroup>
+
+    <Message Importance="high" Text="Extracted SteamLibraryPath: [$(SteamLibraryPath)]" />
+    <Message Importance="high" Text="HasteDir: [$(HasteDir)]" />
+    <Message Importance="high" Text="HasteManagedDir: [$(HasteManagedDir)]" />
+		<Message Importance="high" Text="EnableHarmony: [$(EnableHarmony)]" />
+		<Message Importance="high" Text="EnableSettingsLib: [$(EnableSettingsLib)]" />
+    <Message Importance="high" Text="Harmony: [$(HarmonyWorkshopDir)]" Condition="'$(EnableHarmony)'=='true'" />
+		<Message Importance="high" Text="SettingsLib: [$(SettingsLibDir)]" Condition="'$(EnableSettingsLib)'=='true'" />
+
+    <!-- Add references for Haste Managed DLLs -->
+    <ItemGroup Condition="Exists('$(HasteManagedDir)')">
+      <Reference Include="$(HasteManagedDir)/*.dll" Private="false" />
+    </ItemGroup>
+
+    <!-- Conditionally add references for the Harmony workshop item -->
+    <ItemGroup
+            Condition="'$(EnableHarmony)'=='true' and Exists('$(HarmonyWorkshopDir)')"
+        >
+      <Reference Include="$(HarmonyWorkshopDir)" Private="false" />
+		</ItemGroup>
+
+		<ItemGroup
+            Condition="'$(EnableSettingsLib)'=='true' and Exists('$(SettingsLibDir)')"
+        >
+			<Reference Include="$(SettingsLibDir)" Private="false" />
+		</ItemGroup>
+	</Target>
+
+</Project>

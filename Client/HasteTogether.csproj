@@ -1,45 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk">
+    <Import Project=".steam.props" />
 
     <PropertyGroup>
         <TargetFramework>netstandard2.1</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <LangVersion>latest</LangVersion>
-        <HASTEDir Condition=" '$(HASTEDir)' == '' ">C:\Program Files (x86)\Steam\steamapps\common\Haste</HASTEDir>
-        <DisableImplicitFrameworkReferences>true</DisableImplicitFrameworkReferences>
 
-        <!-- Do not generate .deps.json file (it is not needed) -->
-        <GenerateDependencyFile>false</GenerateDependencyFile>
+        <EnableHarmony>false</EnableHarmony>
+				<EnableSettingsLib>true</EnableSettingsLib>
+
+				<SettingsLibDir>/home/user/Dev/dotnet/FullGame/HasteSettingLib/SettingsLib/bin/Debug/netstandard2.1/SettingsLib.dll</SettingsLibDir>
     </PropertyGroup>
-
-    <ItemGroup>
-        <PackageReference Include="Krafs.Publicizer" Version="2.3.0"/>
-        <Reference Include="$(HASTEDir)\Haste_Data\Managed\Assembly-CSharp.dll" Private="false" Publicize="true"/>
-        <Reference Include="$(HASTEDir)\Haste_Data\Managed\Zorro.ControllerSupport.dll" Private="false" Publicize="true"/>
-        <Reference Include="$(HASTEDir)\Haste_Data\Managed\Zorro.Core.Runtime.dll" Private="false"/>
-        <Reference Include="$(HASTEDir)\Haste_Data\Managed\Zorro.Settings.Runtime.dll" Private="false" Publicize="true"/>
-        <Reference Include="$(HASTEDIR)\Haste_Data\Managed\Unity.Mathematics.dll" Private="false"/>
-        <Reference Include="$(HASTEDir)\Haste_Data\Managed\UnityEngine.UI.dll" Private="false"/>
-        <Reference Include="$(HASTEDir)\Haste_Data\Managed\Unity.TextMeshPro.dll" Private="false"/>
-        <Reference Include="$(HASTEDir)\Haste_Data\Managed\Unity.InputSystem.dll" Private="false"/>
-        <Reference Include="$(HASTEDir)\Haste_Data\Managed\com.rlabrecque.steamworks.net.dll" Private="false"/>
-        <Reference Include="$(HASTEDir)\Haste_Data\Managed\Landfall.Modding.dll" Private="false"/>
-        <Reference Include="$(HASTEDir)\Haste_Data\Managed\mscorlib.dll" Private="false"/>
-        <Reference Include="$(HASTEDir)\Haste_Data\Managed\netstandard.dll" Private="false"/>
-        <Reference Include="$(HASTEDir)\Haste_Data\Managed\System.Core.dll" Private="false"/>
-        <Reference Include="$(HASTEDir)\Haste_Data\Managed\System.dll" Private="false"/>
-        <Reference Include="$(HASTEDir)\Haste_Data\Managed\System.Runtime.dll" Private="false"/>
-        <Reference Include="$(HASTEDir)\Haste_Data\Managed\UnityEngine.*.dll" Private="false"/>
-        <Reference Include="$(HASTEDir)\Haste_Data\Managed\System.Net.Primitives.dll" Private="false"/>
-        <Reference Include="D:\Steam\steamapps\workshop\content\1796470\3408901301\0Harmony.dll"/>
-        <Publicize Include="Assembly-CSharp" />
-    </ItemGroup>
-
-    <ItemGroup>
-        <None Remove="Graphics\HasteTogether_Connected.png" />
-        <EmbeddedResource Include="Graphics\HasteTogether_Connected.png" />
-        <None Remove="Graphics\HasteTogether_Disconnected.png" />
-        <EmbeddedResource Include="Graphics\HasteTogether_Disconnected.png" />
-    </ItemGroup>
-
 </Project>
